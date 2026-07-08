@@ -6,8 +6,9 @@ A modular workflow for generating the consensus sequence from alignment informat
 
 ```
 nextflow run j23414/bam-consensus \
-  --bam [path/*.bam \
+  --bam [path/*.bam] \
   --samplesheet [path/bam_samplesheet.csv] \
+  --reference [path/reference.fasta] \
   --outdir "consensus-results" \
   -profile stjude
 ```

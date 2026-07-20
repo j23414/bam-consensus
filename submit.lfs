@@ -1,0 +1,25 @@
+#!/bin/bash
+
+#BSUB -n 2
+#BSUB -o out.%J
+#BSUB -e err.%J
+#BSUB -J Consensus
+#BSUB -N
+##BSUB -u someone@out.there
+
+# Please do not remove this line
+source /etc/bashrc.modules
+
+# Load Nextflow dependencies
+source /home/jchang99/.bashrc
+conda activate nf-env
+
+module load htslib/1.22.1
+module load bwa-mem2/2.2.1
+module load samtools/1.15.1
+module load R
+
+nextflow run j23414/bam-consensus \
+  --samplesheet samplesheet.csv \
+  --reference "reference/reference.fasta" \
+  -profile stjude

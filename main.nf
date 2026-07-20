@@ -1,16 +1,25 @@
 include { VIRALCONSENSUS} from './modules/nf-core/viralconsensus/main'
-include { SAMTOOLS_INDEX } from './modules/nf-core/samtools/index/main'
 
-process GET_REFERENCE_NAMES {
-  input: path(reference)
-  output: path("${reference.baseName}_names.txt")
-  script:
-  """
-  grep ">" ${reference} | sed 's/>//g' | sed 's/ //g' > ${reference.baseName}_names.txt
-  """
+process SPLIT_REFERENCE {
+    tag "${meta.segment}"
+    label 'process_low'
+    input: tuple val(meta), path(reference)
+    output: tuple val(meta), path("${reference.baseName}_*.fasta")
+
+    script:
+    def refname = meta.segment
+    """
+    awk -v id="${refname}" '
+        /^>/ {
+            keep = (\$2 ~ id || substr(\$1,2) ~ id)
+        }
+        keep
+    ' "${reference}" > "${reference.baseName}_${refname}.fasta"
+    """
 }
 
 process SAMTOOLS_SUBSET {
+    tag "${meta.id},${meta.segment}"
     label 'process_low'
 
     conda "./modules/nf-core/samtools/view/environment.yml"
@@ -18,32 +27,16 @@ process SAMTOOLS_SUBSET {
         ? 'https://community-cr-prod.seqera.io/docker/registry/v2/blobs/sha256/8c/8c5d2818c8b9f58e1fba77ce219fdaf32087ae53e857c4a496402978af26e78c/data'
         : 'community.wave.seqera.io/library/htslib_samtools:1.23.1--5b6bb4ede7e612e5'}"
 
-    input: tuple val(reference_name), path(bam)
-    output: tuple val("${reference_name.tokenize('|')[0]}"), val("${bam.baseName}_${reference_name.tokenize('|')[0]}"), path("${bam.baseName}_*.bam")
+    input: tuple val(meta), path(bam), path(reference)
+    output: tuple val(meta), path("*_subset.bam"), path(reference)
 
     script:
-    def refname = reference_name.tokenize('|')[0]
+    def sample = meta.id
+    def refname = meta.segment
 
     """
     samtools index ${bam}
-    samtools view -h ${bam} | grep -e "${refname}" -e "^@PG" | samtools view -bS > ${bam.baseName}_${refname}.bam
-    """
-}
-
-process SPLIT_REFERENCE {
-    label 'process_low'
-    input: tuple val(name), path(reference)
-    output: tuple val(name.tokenize('|')[0]), path("${reference.baseName}_${name.tokenize('|')[0]}.fasta")
-
-    script:
-    def refname = name.tokenize('|')[0]
-    """
-    awk -v id="${name}" '
-        /^>/ {
-            keep = (\$2 == id || substr(\$1,2) == id)
-        }
-        keep
-    ' "${reference}" > "${reference.baseName}_${refname}.fasta"
+    samtools view -h ${bam} | grep -e "${refname}" -e "^@PG" | samtools view -bS > ${sample}_${refname}_subset.bam
     """
 }
 
@@ -54,7 +47,7 @@ workflow {
       bam_ch = channel.fromPath(params.samplesheet)
         | splitCsv(header: true)
         | map { row ->
-            tuple([id: row.sample], [file(row.bam)])
+            tuple([id: row.sample], file(row.bam))
           }
     } else if (params.bam) {
         bam_ch = channel.fromPath(params.bam, checkIfExists: true)
@@ -62,44 +55,34 @@ workflow {
     } else {
         error "Please specify either --samplesheet samplesheet.csv or --bam 'data/*.bam'"
     }
-    bam_ch | SAMTOOLS_INDEX
-    bam_indexed_ch = bam_ch
-    | join(SAMTOOLS_INDEX.out.index)
 
     // Load reference
-    reference_ch = channel.fromPath(params.reference, checkIfExists:true)
-    | map {
-      n ->
-      return tuple(n.baseName, n)
+    reference_ch = channel.fromPath(params.reference, checkIfExists: true)
+
+    reference_segments_ch = reference_ch.flatMap { fasta ->
+      fasta.readLines()
+        .findAll { it.startsWith(">") }
+        .collect { header ->
+            def id = header.substring(1).split("\\|")[0]
+            tuple([segment:"${id}"], fasta)
+        }
     }
-
-    // Split reference by segment name
-    reference_names_ch = reference_ch
-    | map { n -> n.get(1) }
-    | GET_REFERENCE_NAMES
-    | map { n -> n.readLines()}
-    | flatten
-
-    reference_names_ch
-    | combine(bam_ch | map {n -> n.get(1)})
-    | SAMTOOLS_SUBSET
-
-    reference_names_ch
-    | combine(reference_ch | map { n -> n.get(1)})
     | SPLIT_REFERENCE
-    | view
-
-    input_ch = SAMTOOLS_SUBSET.out
-    | join(SPLIT_REFERENCE.out)
-    | map { n -> return tuple(n.get(0), n.get(1), n.get(2), n.get(3), [ ], [ ], [ ])}
+    
+    combine_ch = bam_ch
+    | combine(reference_segments_ch)
+    | map { sample_meta, bam, ref_meta, fasta ->
+        def meta = sample_meta + ref_meta
+        tuple(meta, bam, fasta)
+    }
+    | SAMTOOLS_SUBSET
+    | map { meta, bam, fasta -> tuple([id:"${meta.id}_${meta.segment}"], bam, fasta, [], [], [])}
 
     VIRALCONSENSUS(
-      input_ch | map { n -> tuple(id:n.get(1), n.get(2))},
-      input_ch | map { n -> tuple(n.get(0), n.get(3))},
-      input_ch | map { n -> n.get(4)},
-      input_ch | map { n -> n.get(5)},
-      input_ch | map { n -> n.get(6)}
+        combine_ch | map{ meta,bam,fasta,bed,save_pos,save_neg -> tuple(meta, bam)},
+        combine_ch | map{ meta,bam,fasta,bed,save_pos,save_neg -> tuple(meta, file(fasta))},
+        combine_ch | map{ meta,bam,fasta,bed,save_pos,save_neg -> bed},
+        combine_ch | map{ meta,bam,fasta,bed,save_pos,save_neg -> save_pos},
+        combine_ch | map{ meta,bam,fasta,bed,save_pos,save_neg -> save_neg}
     )
-
-    VIRALCONSENSUS.out.fasta | view
 }

@@ -1,0 +1,42 @@
+%%metro title: j23414/bam-consensus
+%%metro line_order: definition
+%%metro line: main | Main | #c792ea
+%%metro line: bam | BAM | #60a5fa
+%%metro line: ref | Reference FASTA | #fbbf24
+
+graph LR
+
+    subgraph input [Input]
+        bam["Aligned BAM files"]
+        ref["Segmented Reference FASTA"]
+    end
+
+    subgraph subset [BAM Processing]
+        combine["Combine BAM + Reference Segments"]
+        subset_bam["Subset BAM by Segment<br>SAMTOOLS_SUBSET"]
+        segment_bam["Segment-specific BAM"]
+    end
+
+    subgraph consensus [Consensus Calling]
+        viralconsensus["VIRALCONSENSUS"]
+    end
+
+    subgraph results [Results]
+        consensus_fasta["Segment Consensus FASTA"]
+    end
+
+    subgraph reference [Reference Processing]
+        split["Split Reference by Segment<br>SPLIT_REFERENCE"]
+        segment_ref["Segment-specific FASTA"]
+    end
+
+    bam -->|main| combine
+    combine -->|main| subset_bam
+    subset_bam -->|main| segment_bam
+    segment_bam -->|main| viralconsensus
+    viralconsensus -->|main| consensus_fasta
+    
+    ref -->|ref| split
+    split -->|ref| segment_ref
+    segment_ref -->|ref| combine
+    segment_ref -->|ref| viralconsensus

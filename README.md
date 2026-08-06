@@ -2,6 +2,8 @@
 
 A modular workflow for generating the consensus sequence from alignment information.
 
+![](diagram.png)
+
 ## Usage
 
 ```

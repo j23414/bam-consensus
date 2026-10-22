@@ -1,13 +1,13 @@
 include { VIRALCONSENSUS} from './modules/nf-core/viralconsensus/main'
 
 process SPLIT_REFERENCE {
-    tag "${meta.segment}"
+    tag "${meta.reference_id}"
     label 'process_low'
     input: tuple val(meta), path(reference)
     output: tuple val(meta), path("${reference.baseName}_*.fasta")
 
     script:
-    def refname = meta.segment
+    def refname = meta.reference_id
     """
     awk -v id="${refname}" '
         /^>/ {
@@ -19,7 +19,7 @@ process SPLIT_REFERENCE {
 }
 
 process SAMTOOLS_SUBSET {
-    tag "${meta.id},${meta.segment}"
+    tag "${meta.id},${meta.reference_id}"
     label 'process_low'
 
     conda "./modules/nf-core/samtools/view/environment.yml"
@@ -32,7 +32,7 @@ process SAMTOOLS_SUBSET {
 
     script:
     def sample = meta.id
-    def refname = meta.segment
+    def refname = meta.reference_id
 
     """
     samtools index ${bam}
@@ -44,10 +44,12 @@ workflow {
     main:
     // Load bam alignments
     if (params.samplesheet) {
+      // sample,bam,reference
       bam_ch = channel.fromPath(params.samplesheet)
         | splitCsv(header: true)
         | map { row ->
-            tuple([id: row.sample], file(row.bam))
+            def reference_id = row.reference.split("\\|")[0]
+            tuple([id: row.sample, reference_id: reference_id], file(row.bam))
           }
     } else if (params.bam) {
         bam_ch = channel.fromPath(params.bam, checkIfExists: true)
@@ -63,26 +65,35 @@ workflow {
       fasta.readLines()
         .findAll { it.startsWith(">") }
         .collect { header ->
-            def id = header.substring(1).split("\\|")[0]
-            tuple([segment:"${id}"], fasta)
+            def reference_id = header.substring(1).split("\\|")[0]
+            tuple([reference_id:"${reference_id}"], fasta)
         }
     }
     | SPLIT_REFERENCE
-    
-    combine_ch = bam_ch
-    | combine(reference_segments_ch)
-    | map { sample_meta, bam, ref_meta, fasta ->
-        def meta = sample_meta + ref_meta
-        tuple(meta, bam, fasta)
+
+    // Join bam with the appropriate reference
+    bam_join_ch = bam_ch.map { meta, bam ->
+        tuple(meta.reference_id, meta, bam)
     }
-    | SAMTOOLS_SUBSET
-    | map { meta, bam, fasta -> tuple([id:"${meta.id}_${meta.segment}"], bam, fasta, [], [], [])}
+
+    reference_join_ch = reference_segments_ch.map { meta, fasta ->
+        tuple(meta.reference_id, meta, fasta)
+    }
+
+    combine_ch = bam_join_ch
+    .combine(reference_join_ch, by:0)
+    .map { reference_id, sample_meta, bam, ref_meta, fasta ->
+        tuple(sample_meta + ref_meta, bam, fasta)
+    }
+
+    viral_consensus_input_ch = SAMTOOLS_SUBSET(combine_ch)
+    .map { meta, bam, fasta -> tuple([id:"${meta.id}_${meta.reference_id}"], bam, fasta, [], [], [])}
 
     VIRALCONSENSUS(
-        combine_ch | map{ meta,bam,fasta,bed,save_pos,save_neg -> tuple(meta, bam)},
-        combine_ch | map{ meta,bam,fasta,bed,save_pos,save_neg -> tuple(meta, file(fasta))},
-        combine_ch | map{ meta,bam,fasta,bed,save_pos,save_neg -> bed},
-        combine_ch | map{ meta,bam,fasta,bed,save_pos,save_neg -> save_pos},
-        combine_ch | map{ meta,bam,fasta,bed,save_pos,save_neg -> save_neg}
+        viral_consensus_input_ch | map{ meta,bam,fasta,bed,save_pos,save_neg -> tuple(meta, bam)},
+        viral_consensus_input_ch | map{ meta,bam,fasta,bed,save_pos,save_neg -> tuple(meta, file(fasta))},
+        viral_consensus_input_ch | map{ meta,bam,fasta,bed,save_pos,save_neg -> bed},
+        viral_consensus_input_ch | map{ meta,bam,fasta,bed,save_pos,save_neg -> save_pos},
+        viral_consensus_input_ch | map{ meta,bam,fasta,bed,save_pos,save_neg -> save_neg}
     )
 }
